@@ -1,18 +1,19 @@
 import asyncio
 import logging
 import os
+from collections.abc import AsyncIterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from threading import Thread
 from typing import Dict, List, Literal, cast
 from uuid import uuid4
 
+import torch
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from torch import Tensor
-from transformers import AsyncTextIteratorStreamer, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 load_dotenv(override=True)
 
@@ -36,7 +37,7 @@ class PendingInferenceRequest:
 class InferenceRecord:
     request: InferenceRequest
     ready_flag: asyncio.Event = field(default_factory=asyncio.Event)
-    response: AsyncTextIteratorStreamer | None = None
+    response: AsyncIterable[str] | None = None
 
 
 # ensure HF_TOKEN is set
@@ -56,13 +57,15 @@ class HFModel:
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
         self.batch_size = batch_size
 
+        # queueing and record keeping
         self.request_queue = asyncio.Queue[PendingInferenceRequest](maxsize=self.batch_size)
-
         self._inference_worker_task = asyncio.create_task(self._inference_worker())
-
         self._inference_records: Dict[str, InferenceRecord] = {}
 
-    async def generate(self, req: InferenceRequest) -> AsyncTextIteratorStreamer | str | None:
+        # storing the event loop for async operations from threads
+        self._event_loop = asyncio.get_event_loop()
+
+    async def generate(self, req: InferenceRequest) -> AsyncIterable[str] | str | None:
         pending_req = PendingInferenceRequest(request=req)
         inference_record = InferenceRecord(request=req)
         self._inference_records[pending_req.id] = inference_record
@@ -126,34 +129,69 @@ class HFModel:
                 for i in range(num_items):
                     self.request_queue.task_done()
 
-    def _generate_stream(self, requests: List[PendingInferenceRequest]) -> List[AsyncTextIteratorStreamer]:
-        if len(requests) != 1:
-            raise NotImplementedError("AsyncTextIteratorStreamer only supports batch size 1 for now")
-
+    def _generate_stream(self, requests: List[PendingInferenceRequest]) -> List[AsyncIterable]:
         max_new_tokens = max(pr.request.max_output_tokens for pr in requests)
         inputs = self.tokenizer(
             [pr.request.text for pr in requests],
-            padding=True,  # Pad to same length
+            padding=True,  # pad all to same length
             return_tensors="pt",
         ).to(self.model.device)
 
-        streamer = AsyncTextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
-        thread = Thread(
-            target=self.model.generate,
-            kwargs={
-                "input_ids": inputs["input_ids"],
-                "attention_mask": inputs["attention_mask"],
-                "streamer": streamer,
-                "max_new_tokens": max_new_tokens,
-            },
-        )
-        thread.start()
-        return [streamer]
+        token_queues: List[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
+
+        def auto_regressive_loop():
+            input_ids = inputs["input_ids"]  # [batch_size, max_seq_length]
+            attention_mask = inputs["attention_mask"]  # same shape as input_ids
+
+            logger.info(f"Input IDs shape: {input_ids}")
+            logger.info(f"attention_mask: {attention_mask}")
+
+            # we don't need gradients for inference
+            with torch.no_grad():
+                for i in range(max_new_tokens):
+                    # one forward pass
+                    outputs = self.model(input_ids, attention_mask=attention_mask)
+
+                    # outputs.logits has shape [batch_size, max_seq_length, vocab_size]
+                    # for each request, we only need the logits for the latest generation,
+                    generated_token_logits = outputs.logits[:, -1, :]  # [batch_size, vocab_size]
+
+                    # greedy sampling (getting the token with the highest probability)
+                    generated_tokens = torch.argmax(generated_token_logits, dim=-1).reshape(-1, 1)  # [batch_size, 1]
+
+                    # decode the token
+                    for req_idx, token in enumerate(generated_tokens):
+                        decoded_token = self.tokenizer.decode(token.squeeze(), skip_special_tokens=False)
+                        logger.info(f"Generated token for request {requests[req_idx].id}: {decoded_token}")
+                        asyncio.run_coroutine_threadsafe(
+                            token_queues[req_idx].put(decoded_token),
+                            self._event_loop,
+                        )
+
+                    input_ids = torch.cat([input_ids, generated_tokens], dim=-1)  # [batch_size, max_seq_length + 1]
+
+            # signal end of generation
+            for queue in token_queues:
+                asyncio.run_coroutine_threadsafe(queue.put(None), self._event_loop)
+
+        # start the auto-regressive loop in a separate thread
+        logger.info("Starting auto-regressive loop for inference generation.")
+        Thread(target=auto_regressive_loop, daemon=True).start()
+
+        async def create_stream(queue: asyncio.Queue[str | None]) -> AsyncIterable[str]:
+            while True:
+                token = await queue.get()
+                if token is None:
+                    break
+
+                yield token
+
+        return [create_stream(queue) for queue in token_queues]
 
     def _generate_non_stream(self, req: InferenceRequest) -> str:
         inputs = self.tokenizer(req.text, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(**inputs, max_new_tokens=req.max_output_tokens)
-        assert isinstance(outputs, Tensor)
+        assert isinstance(outputs, torch.Tensor)
 
         logger.info(f"birajlog Input shape: {inputs['input_ids'].shape}")
         logger.info(f"birajlog Output shape: {outputs.shape}")
@@ -199,7 +237,13 @@ app = FastAPI(lifespan=lifespan)
 async def run_inference(inference_req: InferenceRequest):
     model = cast(HFModel, app.state.model)  # for type completion
     response = await model.generate(inference_req)
-    if isinstance(response, AsyncTextIteratorStreamer):
+    if response is None:
+        return JSONResponse(
+            content={"error": "Request queue is full, please try again later."},
+            status_code=503,
+        )
+
+    if isinstance(response, AsyncIterable):
 
         async def _stream_with_sse():
             async for chunk in response:
@@ -207,4 +251,4 @@ async def run_inference(inference_req: InferenceRequest):
 
         return StreamingResponse(_stream_with_sse(), media_type="text/event-stream")
 
-    return response
+    return JSONResponse(content={"response": response})
