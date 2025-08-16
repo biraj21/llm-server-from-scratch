@@ -1,6 +1,9 @@
 # LLM Serving from Scratch
 
-FastAPI server for Google's Gemma-3-270M model with streaming support.
+FastAPI server for Google's Gemma 3 270M model with streaming support.
+
+> [!NOTE]
+> This project is a learning experiment and is not intended for production use.
 
 ## Setup
 
