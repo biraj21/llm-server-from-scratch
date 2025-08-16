@@ -1,4 +1,5 @@
 {
+  "pythonVersion": "3.12",
   "venvPath": ".",
   "venv": ".venv"
 }
