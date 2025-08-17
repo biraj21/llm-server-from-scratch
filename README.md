@@ -40,5 +40,7 @@ curl -X POST "http://localhost:8000/generate" \
 
 - ✅ Basic inference
 - ✅ Token streaming
-- ❌ Request batching
-- ❌ Concurrent inference
+- ✅ Request batching
+- ✅ Concurrent inference
+- ❌ Continuous batching
+- ❌ KV caching optimization
