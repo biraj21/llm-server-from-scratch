@@ -53,11 +53,19 @@ class HFModel:
         """
 
         self.model_name = model_name
+
+        # set up model and tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
-        self.batch_size = batch_size
+
+        eos_token_id = self.model.generation_config.eos_token_id if self.model.generation_config else []
+        if not isinstance(eos_token_id, list):
+            eos_token_id = [eos_token_id]
+
+        self.eos_token_ids = set(eos_token_id)  # convert to set for faster lookup
 
         # queueing and record keeping
+        self.batch_size = batch_size
         self.request_queue = asyncio.Queue[PendingInferenceRequest](maxsize=self.batch_size)
         self._inference_worker_task = asyncio.create_task(self._inference_worker())
         self._inference_records: Dict[str, InferenceRecord] = {}
@@ -77,11 +85,14 @@ class HFModel:
             self._inference_records.pop(pending_req.id, None)
             return None
 
-        # await inference generation
+        # await response to be available
         await inference_record.ready_flag.wait()
+
+        # handle failure (None) or streaming response
         if inference_record.response is None or req.stream:
             return inference_record.response
 
+        # non-streaming collect the chunks and return it as a single string
         chunks = [chunk async for chunk in inference_record.response]
         return "".join(chunks)
 
@@ -129,6 +140,20 @@ class HFModel:
                 for i in range(num_items):
                     self.request_queue.task_done()
 
+    @staticmethod
+    async def _create_stream(queue: asyncio.Queue[str | None]) -> AsyncIterable[str]:
+        """
+        Utility function to create an async iterable stream of tokens
+        from a asyncio queue.
+        """
+
+        while True:
+            token = await queue.get()
+            if token is None:
+                break
+
+            yield token
+
     def _generate_stream(self, requests: List[PendingInferenceRequest]) -> List[AsyncIterable]:
         max_new_tokens = max(pr.request.max_output_tokens for pr in requests)
         inputs = self.tokenizer(
@@ -138,19 +163,18 @@ class HFModel:
         ).to(self.model.device)
 
         token_queues: List[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
+        completed_requests = [False for _ in requests]
 
         def auto_regressive_loop():
             input_ids = inputs["input_ids"]  # [batch_size, max_seq_length]
-            attention_mask = inputs["attention_mask"]  # same shape as input_ids
-
-            logger.info(f"Input IDs shape: {input_ids}")
-            logger.info(f"attention_mask: {attention_mask}")
+            # attention_mask = inputs["attention_mask"]  # same shape as input_ids
 
             # we don't need gradients for inference
             with torch.no_grad():
                 for i in range(max_new_tokens):
                     # one forward pass
-                    outputs = self.model(input_ids, attention_mask=attention_mask)
+                    # passing attention_mask caused it to get stuck in a loop idk why
+                    outputs = self.model(input_ids)
 
                     # outputs.logits has shape [batch_size, max_seq_length, vocab_size]
                     # for each request, we only need the logits for the latest generation,
@@ -160,9 +184,20 @@ class HFModel:
                     generated_tokens = torch.argmax(generated_token_logits, dim=-1).reshape(-1, 1)  # [batch_size, 1]
 
                     # decode the token
-                    for req_idx, token in enumerate(generated_tokens):
-                        decoded_token = self.tokenizer.decode(token.squeeze(), skip_special_tokens=False)
-                        logger.info(f"Generated token for request {requests[req_idx].id}: {decoded_token}")
+                    for req_idx, token_id in enumerate(generated_tokens):
+                        # skip if this request has already completed
+                        if completed_requests[req_idx]:
+                            continue
+
+                        token_id = token_id.squeeze().item()  # convert to python int
+                        if token_id in self.eos_token_ids:
+                            # signal end of generation
+                            asyncio.run_coroutine_threadsafe(token_queues[req_idx].put(None), self._event_loop)
+                            completed_requests[req_idx] = True
+                            logger.info(f"Request {requests[req_idx].id} completed at step {i + 1}.")
+                            continue
+
+                        decoded_token = self.tokenizer.decode(token_id, skip_special_tokens=False)
                         asyncio.run_coroutine_threadsafe(
                             token_queues[req_idx].put(decoded_token),
                             self._event_loop,
@@ -171,22 +206,18 @@ class HFModel:
                     input_ids = torch.cat([input_ids, generated_tokens], dim=-1)  # [batch_size, max_seq_length + 1]
 
             # signal end of generation
-            for queue in token_queues:
+            for req_idx, queue in enumerate(token_queues):
+                if completed_requests[req_idx]:
+                    continue
+
                 asyncio.run_coroutine_threadsafe(queue.put(None), self._event_loop)
+                completed_requests[req_idx] = True
 
         # start the auto-regressive loop in a separate thread
         logger.info("Starting auto-regressive loop for inference generation.")
         Thread(target=auto_regressive_loop, daemon=True).start()
 
-        async def create_stream(queue: asyncio.Queue[str | None]) -> AsyncIterable[str]:
-            while True:
-                token = await queue.get()
-                if token is None:
-                    break
-
-                yield token
-
-        return [create_stream(queue) for queue in token_queues]
+        return [self._create_stream(queue) for queue in token_queues]
 
     def _generate_non_stream(self, req: InferenceRequest) -> str:
         inputs = self.tokenizer(req.text, return_tensors="pt").to(self.model.device)
@@ -209,10 +240,10 @@ class HFModel:
 async def lifespan(app: FastAPI):
     try:
         # Load the ML model
-        model = HFModel("google/gemma-3-270m-it")
+        model = HFModel("google/gemma-3-270m-it", batch_size=8)
 
         # run test inferences
-        test_inputs = ["hey, how are you?", "what's the capital for india?", "what's 2 + 2?"]
+        test_inputs = ["Hey, how are you?", "What's the capital of India?", "What's 2 + 2?"]
         for i, text in enumerate(test_inputs):
             req = InferenceRequest(text=text, max_output_tokens=25, stream=False)
             logger.info(f"test input {i}: {req.text}")
