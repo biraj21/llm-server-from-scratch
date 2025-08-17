@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LLM Server TTFT Analyzer</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        padding: 10px;
+      }
+
+      .container {
+        max-width: 1600px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 15px 30px rgba(0, 0, 0, 0.1);
+        overflow: hidden;
+      }
+
+      .header {
+        background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+        color: white;
+        padding: 20px;
+        text-align: center;
+      }
+
+      .header h1 {
+        font-size: 2rem;
+        margin-bottom: 5px;
+        font-weight: 700;
+      }
+
+      .header p {
+        font-size: 1rem;
+        opacity: 0.9;
+      }
+
+      .controls {
+        padding: 15px 20px;
+        background: #f8fafc;
+        border-bottom: 1px solid #e2e8f0;
+        display: flex;
+        gap: 16px;
+        align-items: last baseline;
+      }
+
+      .control-group {
+        display: flex;
+        gap: 15px;
+        align-items: center;
+        margin-bottom: 15px;
+        flex-wrap: wrap;
+      }
+
+      .control-item {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .control-item label {
+        font-weight: 600;
+        color: #374151;
+        font-size: 0.9rem;
+      }
+
+      .control-item input,
+      .control-item select {
+        padding: 8px 10px;
+        border: 2px solid #d1d5db;
+        border-radius: 6px;
+        font-size: 13px;
+        transition: border-color 0.2s;
+      }
+
+      .control-item input:focus,
+      .control-item select:focus {
+        outline: none;
+        border-color: #4f46e5;
+        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+      }
+
+      .btn {
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        min-width: 100px;
+      }
+
+      .btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+      }
+
+      .btn:disabled {
+        background: #9ca3af;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+
+      .btn-clear {
+        background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      }
+
+      .btn-clear:hover {
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+      }
+
+      .metrics {
+        padding: 15px 20px;
+        background: #f1f5f9;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 15px;
+      }
+
+      .metric-card {
+        background: white;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        text-align: center;
+      }
+
+      .metric-value {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #4f46e5;
+        margin-bottom: 3px;
+      }
+
+      .metric-label {
+        color: #64748b;
+        font-size: 0.8rem;
+        font-weight: 500;
+      }
+
+      .requests-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+        gap: 15px;
+        padding: 20px;
+      }
+
+      .request-card {
+        background: white;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        overflow: hidden;
+        transition: all 0.2s;
+      }
+
+      .request-card.active {
+        border-color: #4f46e5;
+        box-shadow: 0 4px 20px rgba(79, 70, 229, 0.1);
+      }
+
+      .request-card.completed {
+        border-color: #10b981;
+      }
+
+      .request-card.error {
+        border-color: #ef4444;
+      }
+
+      .request-header {
+        padding: 12px 15px;
+        background: #f8fafc;
+        border-bottom: 1px solid #e2e8f0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .request-id {
+        font-weight: 600;
+        color: #374151;
+        font-size: 0.9rem;
+      }
+
+      .request-status {
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .status-pending {
+        background: #fef3c7;
+        color: #92400e;
+      }
+
+      .status-streaming {
+        background: #dbeafe;
+        color: #1e40af;
+      }
+
+      .status-completed {
+        background: #d1fae5;
+        color: #065f46;
+      }
+
+      .status-error {
+        background: #fecaca;
+        color: #991b1b;
+      }
+
+      .request-metrics {
+        padding: 8px 15px;
+        font-size: 0.75rem;
+        color: #64748b;
+        background: #f9fafb;
+      }
+
+      .request-prompt {
+        padding: 12px 15px;
+        font-size: 0.85rem;
+        color: #374151;
+        font-weight: 500;
+        border-bottom: 1px solid #e2e8f0;
+      }
+
+      .request-response {
+        padding: 15px;
+        min-height: 120px;
+        max-height: 250px;
+        overflow-y: auto;
+        font-family: "Consolas", "Monaco", monospace;
+        font-size: 0.85rem;
+        line-height: 1.4;
+        color: #1f2937;
+        background: #fafafa;
+      }
+
+      .cursor {
+        display: inline-block;
+        width: 2px;
+        height: 1.2em;
+        background: #4f46e5;
+        animation: blink 1s infinite;
+        margin-left: 1px;
+      }
+
+      @keyframes blink {
+        0%,
+        50% {
+          opacity: 1;
+        }
+        51%,
+        100% {
+          opacity: 0;
+        }
+      }
+
+      .error-message {
+        color: #ef4444;
+        font-weight: 600;
+      }
+
+      @media (max-width: 768px) {
+        .requests-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .control-group {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .header h1 {
+          font-size: 2rem;
+        }
+      }
+
+      .prompt-selector {
+        width: 100%;
+        max-width: 500px;
+      }
+
+      .custom-prompt {
+        width: 100%;
+        max-width: 600px;
+      }
+
+      #customPromptInput {
+        width: 100%;
+        min-height: 60px;
+        resize: vertical;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>Biraj's LLM Server Test ft. Gemma 3 270M (running on MacBook M3 Pro)</h1>
+        <p>Test concurrent streaming requests and analyze Time to First Token performance</p>
+      </div>
+
+      <div class="controls">
+        <div class="control-group">
+          <div class="control-item">
+            <label for="serverUrl">Server URL:</label>
+            <input
+              type="url"
+              id="serverUrl"
+              value="http://localhost:8000/generate"
+              placeholder="http://localhost:8000/generate"
+            />
+          </div>
+
+          <div class="control-item">
+            <label for="numRequests">Number of Requests:</label>
+            <input type="number" id="numRequests" value="6" min="1" max="8" />
+          </div>
+
+          <div class="control-item">
+            <label for="maxTokens">Max Output Tokens:</label>
+            <input type="number" id="maxTokens" value="80" min="1" max="500" />
+          </div>
+        </div>
+
+        <div class="control-group">
+          <div class="control-item prompt-selector">
+            <label for="promptType">Prompt Selection:</label>
+            <select id="promptType">
+              <option value="default">Use Default Test Prompts</option>
+              <option value="custom">Use Custom Prompt for All</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="control-group" id="customPromptGroup" style="display: none">
+          <div class="control-item custom-prompt">
+            <label for="customPromptInput">Custom Prompt:</label>
+            <textarea id="customPromptInput" placeholder="Enter your custom prompt here...">
+What is the capital of France?</textarea
+            >
+          </div>
+        </div>
+
+        <div class="control-group">
+          <button class="btn" id="startTest">Start Concurrent Test</button>
+          <button class="btn btn-clear" id="clearResults">Clear Results</button>
+        </div>
+      </div>
+
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="metric-value" id="avgTtft">-</div>
+          <div class="metric-label">Avg TTFT (ms)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value" id="minTtft">-</div>
+          <div class="metric-label">Min TTFT (ms)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value" id="maxTtft">-</div>
+          <div class="metric-label">Max TTFT (ms)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value" id="activeRequests">0</div>
+          <div class="metric-label">Active Requests</div>
+        </div>
+      </div>
+
+      <div class="requests-grid" id="requestsGrid">
+        <!-- Request cards will be populated here -->
+      </div>
+    </div>
+
+    <script>
+      const TEST_PROMPTS = [
+        "What is the capital of France?",
+        "Explain photosynthesis in plants.",
+        "How do you make chocolate chip cookies?",
+        "What are the main components of a computer?",
+        "Describe the water cycle.",
+        "What is machine learning?",
+        "How does a car engine work?",
+        "What are the benefits of exercise?",
+        "Explain the concept of gravity.",
+        "How do you solve a Rubik's cube?",
+      ];
+
+      class TTFTAnalyzer {
+        constructor() {
+          this.requests = [];
+          this.activeConnections = 0;
+          this.init();
+        }
+
+        init() {
+          this.bindEvents();
+          this.setupGrid();
+        }
+
+        bindEvents() {
+          document.getElementById("startTest").addEventListener("click", () => this.startTest());
+          document.getElementById("clearResults").addEventListener("click", () => this.clearResults());
+          document
+            .getElementById("promptType")
+            .addEventListener("change", (e) => this.toggleCustomPrompt(e.target.value));
+        }
+
+        toggleCustomPrompt(value) {
+          const customGroup = document.getElementById("customPromptGroup");
+          customGroup.style.display = value === "custom" ? "block" : "none";
+        }
+
+        setupGrid() {
+          const numRequests = parseInt(document.getElementById("numRequests").value);
+          this.createRequestCards(numRequests);
+        }
+
+        createRequestCards(numRequests) {
+          const grid = document.getElementById("requestsGrid");
+          grid.innerHTML = "";
+
+          for (let i = 0; i < numRequests; i++) {
+            const card = document.createElement("div");
+            card.className = "request-card";
+            card.id = `request-${i}`;
+
+            const promptText = this.getPromptForRequest(i);
+
+            card.innerHTML = `
+                        <div class="request-header">
+                            <span class="request-id">Request #${i + 1}</span>
+                            <span class="request-status status-pending">Pending</span>
+                        </div>
+                        <div class="request-metrics" id="metrics-${i}">
+                            TTFT: - | Total Time: - | Tokens: -
+                        </div>
+                        <div class="request-prompt">${promptText}</div>
+                        <div class="request-response" id="response-${i}">
+                            <span style="color: #64748b;">Waiting to start...</span>
+                        </div>
+                    `;
+
+            grid.appendChild(card);
+          }
+        }
+
+        getPromptForRequest(index) {
+          const promptType = document.getElementById("promptType").value;
+          if (promptType === "custom") {
+            return document.getElementById("customPromptInput").value || TEST_PROMPTS[0];
+          }
+          return TEST_PROMPTS[index % TEST_PROMPTS.length];
+        }
+
+        async startTest() {
+          const startBtn = document.getElementById("startTest");
+          const numRequests = parseInt(document.getElementById("numRequests").value);
+
+          startBtn.disabled = true;
+          startBtn.textContent = "Running Test...";
+
+          // Reset previous results
+          this.requests = [];
+          this.activeConnections = 0;
+          this.updateActiveRequests();
+
+          // Create new request cards
+          this.createRequestCards(numRequests);
+
+          // Start all requests concurrently
+          const promises = [];
+          for (let i = 0; i < numRequests; i++) {
+            promises.push(this.sendRequest(i));
+          }
+
+          try {
+            await Promise.allSettled(promises);
+            this.calculateMetrics();
+          } catch (error) {
+            console.error("Error during test:", error);
+          } finally {
+            startBtn.disabled = false;
+            startBtn.textContent = "Start Concurrent Test";
+          }
+        }
+
+        async sendRequest(requestIndex) {
+          const serverUrl = document.getElementById("serverUrl").value;
+          const maxTokens = parseInt(document.getElementById("maxTokens").value);
+          const promptText = this.getPromptForRequest(requestIndex);
+
+          const requestData = {
+            text: promptText,
+            max_output_tokens: maxTokens,
+            stream: true,
+          };
+
+          const requestInfo = {
+            index: requestIndex,
+            startTime: Date.now(),
+            ttft: null,
+            endTime: null,
+            tokenCount: 0,
+            status: "pending",
+          };
+
+          this.requests[requestIndex] = requestInfo;
+          this.updateRequestStatus(requestIndex, "streaming");
+          this.activeConnections++;
+          this.updateActiveRequests();
+
+          try {
+            const response = await fetch(serverUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(requestData),
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            const responseDiv = document.getElementById(`response-${requestIndex}`);
+            responseDiv.innerHTML = "";
+
+            let firstTokenReceived = false;
+            let accumulatedText = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+
+              if (done) break;
+
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split("\n");
+
+              for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                  const token = line.slice(6); // Remove 'data: ' prefix
+
+                  if (token.trim()) {
+                    if (!firstTokenReceived) {
+                      requestInfo.ttft = Date.now() - requestInfo.startTime;
+                      firstTokenReceived = true;
+                      this.updateRequestMetrics(requestIndex);
+                    }
+
+                    accumulatedText += token;
+                    requestInfo.tokenCount++;
+
+                    // Update the response display with streaming effect
+                    responseDiv.innerHTML = this.escapeHtml(accumulatedText) + '<span class="cursor"></span>';
+                    responseDiv.scrollTop = responseDiv.scrollHeight;
+
+                    this.updateRequestMetrics(requestIndex);
+                  }
+                }
+              }
+            }
+
+            requestInfo.endTime = Date.now();
+            requestInfo.status = "completed";
+
+            // Remove cursor and finalize display
+            responseDiv.innerHTML = this.escapeHtml(accumulatedText);
+
+            this.updateRequestStatus(requestIndex, "completed");
+            this.updateRequestMetrics(requestIndex);
+          } catch (error) {
+            console.error(`Request ${requestIndex} failed:`, error);
+            requestInfo.status = "error";
+
+            const responseDiv = document.getElementById(`response-${requestIndex}`);
+            responseDiv.innerHTML = `<span class="error-message">Error: ${error.message}</span>`;
+
+            this.updateRequestStatus(requestIndex, "error");
+          } finally {
+            this.activeConnections--;
+            this.updateActiveRequests();
+          }
+        }
+
+        updateRequestStatus(requestIndex, status) {
+          const card = document.getElementById(`request-${requestIndex}`);
+          const statusSpan = card.querySelector(".request-status");
+
+          // Remove existing status classes
+          card.classList.remove("active", "completed", "error");
+          statusSpan.classList.remove("status-pending", "status-streaming", "status-completed", "status-error");
+
+          // Add new status classes
+          statusSpan.classList.add(`status-${status}`);
+          if (status === "streaming") {
+            card.classList.add("active");
+          } else if (status === "completed") {
+            card.classList.add("completed");
+          } else if (status === "error") {
+            card.classList.add("error");
+          }
+
+          // Update status text
+          statusSpan.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        }
+
+        updateRequestMetrics(requestIndex) {
+          const request = this.requests[requestIndex];
+          const metricsDiv = document.getElementById(`metrics-${requestIndex}`);
+
+          const ttftText = request.ttft !== null ? `${request.ttft}ms` : "-";
+          const totalTime = request.endTime ? `${request.endTime - request.startTime}ms` : "Running...";
+
+          metricsDiv.textContent = `TTFT: ${ttftText} | Total Time: ${totalTime} | Tokens: ${request.tokenCount}`;
+        }
+
+        updateActiveRequests() {
+          document.getElementById("activeRequests").textContent = this.activeConnections;
+        }
+
+        calculateMetrics() {
+          const completedRequests = this.requests.filter((req) => req && req.ttft !== null);
+
+          if (completedRequests.length === 0) {
+            document.getElementById("avgTtft").textContent = "-";
+            document.getElementById("minTtft").textContent = "-";
+            document.getElementById("maxTtft").textContent = "-";
+            return;
+          }
+
+          const ttfts = completedRequests.map((req) => req.ttft);
+          const avgTtft = ttfts.reduce((sum, ttft) => sum + ttft, 0) / ttfts.length;
+          const minTtft = Math.min(...ttfts);
+          const maxTtft = Math.max(...ttfts);
+
+          document.getElementById("avgTtft").textContent = Math.round(avgTtft);
+          document.getElementById("minTtft").textContent = minTtft;
+          document.getElementById("maxTtft").textContent = maxTtft;
+        }
+
+        clearResults() {
+          this.requests = [];
+          this.activeConnections = 0;
+
+          document.getElementById("avgTtft").textContent = "-";
+          document.getElementById("minTtft").textContent = "-";
+          document.getElementById("maxTtft").textContent = "-";
+          document.getElementById("activeRequests").textContent = "0";
+
+          this.setupGrid();
+        }
+
+        escapeHtml(text) {
+          const div = document.createElement("div");
+          div.textContent = text;
+          return div.innerHTML;
+        }
+      }
+
+      // Initialize the analyzer when the page loads
+      document.addEventListener("DOMContentLoaded", () => {
+        new TTFTAnalyzer();
+      });
+    </script>
+  </body>
+</html>
