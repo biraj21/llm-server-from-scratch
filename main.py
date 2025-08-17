@@ -64,7 +64,7 @@ class HFModel:
 
         self.eos_token_ids = set(eos_token_id)  # convert to set for faster lookup
 
-        # queueing and record keeping
+        # batching, queueing and record keeping
         self.batch_size = batch_size
         self.request_queue = asyncio.Queue[PendingInferenceRequest](maxsize=self.batch_size)
         self._inference_worker_task = asyncio.create_task(self._inference_worker())
