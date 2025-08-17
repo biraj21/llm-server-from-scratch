@@ -125,7 +125,11 @@ class HFModel:
             try:
                 batch = await self._collect_batch()
                 num_items = len(batch)
-                responses = self._generate_stream(batch)
+
+                # Create an event for this batch
+                batch_complete_event = asyncio.Event()
+
+                responses = self._generate_stream(batch, batch_complete_event)
                 for req, resp in zip(batch, responses):
                     inference_record = self._inference_records.get(req.id)
                     if not inference_record:
@@ -134,6 +138,8 @@ class HFModel:
 
                     inference_record.response = resp
                     inference_record.ready_flag.set()
+
+                await batch_complete_event.wait()
             except Exception as e:
                 logger.error(f"Error during inference: {e}")
             finally:
@@ -154,18 +160,22 @@ class HFModel:
 
             yield token
 
-    def _generate_stream(self, requests: List[PendingInferenceRequest]) -> List[AsyncIterable]:
-        max_new_tokens = max(pr.request.max_output_tokens for pr in requests)
-        inputs = self.tokenizer(
-            [pr.request.text for pr in requests],
-            padding=True,  # pad all to same length
-            return_tensors="pt",
-        ).to(self.model.device)
+    def _auto_regressive_loop(
+        self,
+        requests: List[PendingInferenceRequest],
+        token_queues: List[asyncio.Queue[str | None]],
+        completed_requests: List[bool],
+        batch_complete_event: asyncio.Event,
+    ):
+        logger.info("Starting auto-regressive loop for inference generation.")
+        try:
+            max_new_tokens = max(pr.request.max_output_tokens for pr in requests)
+            inputs = self.tokenizer(
+                [pr.request.text for pr in requests],
+                padding=True,  # pad all to same length
+                return_tensors="pt",
+            ).to(self.model.device)
 
-        token_queues: List[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
-        completed_requests = [False for _ in requests]
-
-        def auto_regressive_loop():
             input_ids = inputs["input_ids"]  # [batch_size, max_seq_length]
             # attention_mask = inputs["attention_mask"]  # same shape as input_ids
 
@@ -204,7 +214,9 @@ class HFModel:
                         )
 
                     input_ids = torch.cat([input_ids, generated_tokens], dim=-1)  # [batch_size, max_seq_length + 1]
-
+        except Exception as e:
+            logger.error(f"Error during auto-regressive loop: {e}")
+        finally:
             # signal end of generation
             for req_idx, queue in enumerate(token_queues):
                 if completed_requests[req_idx]:
@@ -213,9 +225,30 @@ class HFModel:
                 asyncio.run_coroutine_threadsafe(queue.put(None), self._event_loop)
                 completed_requests[req_idx] = True
 
+            logger.info("Auto-regressive loop completed for all requests. Ready to accept new batch.")
+
+            async def set_batch_complete_event():
+                batch_complete_event.set()
+
+            asyncio.run_coroutine_threadsafe(set_batch_complete_event(), self._event_loop)
+
+    def _generate_stream(
+        self, requests: List[PendingInferenceRequest], batch_complete_event: asyncio.Event
+    ) -> List[AsyncIterable]:
+        token_queues: List[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
+        completed_requests = [False for _ in requests]
+
         # start the auto-regressive loop in a separate thread
-        logger.info("Starting auto-regressive loop for inference generation.")
-        Thread(target=auto_regressive_loop, daemon=True).start()
+        Thread(
+            target=self._auto_regressive_loop,
+            kwargs={
+                "requests": requests,
+                "token_queues": token_queues,
+                "completed_requests": completed_requests,
+                "batch_complete_event": batch_complete_event,
+            },
+            daemon=True,
+        ).start()
 
         return [self._create_stream(queue) for queue in token_queues]
 
