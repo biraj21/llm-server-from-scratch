@@ -11,14 +11,22 @@ from uuid import uuid4
 import torch
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 load_dotenv(override=True)
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Configure logger with timestamp formatter
+handler = logging.StreamHandler()
+# Custom date format with dot separator for milliseconds
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 
 class InferenceRequest(BaseModel):
@@ -167,7 +175,7 @@ class HFModel:
         completed_requests: List[bool],
         batch_complete_event: asyncio.Event,
     ):
-        logger.info("Starting auto-regressive loop for inference generation.")
+        logger.info(f"Starting auto-regressive loop for inference generation with {len(requests)} requests.")
         try:
             max_new_tokens = max(pr.request.max_output_tokens for pr in requests)
             inputs = self.tokenizer(
@@ -277,10 +285,15 @@ async def lifespan(app: FastAPI):
 
         # run test inferences
         test_inputs = ["Hey, how are you?", "What's the capital of India?", "What's 2 + 2?"]
+        inferences_tasks = []
         for i, text in enumerate(test_inputs):
             req = InferenceRequest(text=text, max_output_tokens=25, stream=False)
-            logger.info(f"test input {i}: {req.text}")
-            response = await model.generate(req)
+            task = asyncio.create_task(model.generate(req))
+            inferences_tasks.append(task)
+
+        results = await asyncio.gather(*inferences_tasks)
+        for input_text, response in zip(test_inputs, results):
+            logger.info(f"test input {i}: {input_text}")
             logger.info(f"response: {response}")
             logger.info("-" * 80)
 
@@ -295,6 +308,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/generate")
