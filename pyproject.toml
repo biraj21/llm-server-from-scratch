@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "accelerate>=1.10.0",
     "fastapi[standard]>=0.116.1",
     "python-dotenv>=1.1.1",
     "torch>=2.8.0",
@@ -13,8 +14,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "datasets[audio]>=4.0.0",
     "pyright>=1.1.403",
     "ruff>=0.12.9",
+    "tqdm>=4.67.1",
 ]
 
 

@@ -64,7 +64,12 @@ class HFModel:
 
         # set up model and tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+        logger.info(f"Using device: {self.model.device}")
 
         eos_token_id = self.model.generation_config.eos_token_id if self.model.generation_config else []
         if not isinstance(eos_token_id, list):
@@ -284,7 +289,16 @@ async def lifespan(app: FastAPI):
         model = HFModel("google/gemma-3-270m-it", batch_size=8)
 
         # run test inferences
-        test_inputs = ["Hey, how are you?", "What's the capital of India?", "What's 2 + 2?"]
+        test_inputs = [
+            "Hey, how are you?",
+            "What's the capital of India?",
+            "What's 2 + 2?",
+            "Write a haiku about AI.",
+            "Tell me a joke.",
+            "Explain quantum computing in 2 sentences.",
+            "What is the meaning of life?",
+            "Tell me about Batman",
+        ]
         inferences_tasks = []
         for i, text in enumerate(test_inputs):
             req = InferenceRequest(text=text, max_output_tokens=25, stream=False)
@@ -292,7 +306,7 @@ async def lifespan(app: FastAPI):
             inferences_tasks.append(task)
 
         results = await asyncio.gather(*inferences_tasks)
-        for input_text, response in zip(test_inputs, results):
+        for i, (input_text, response) in enumerate(zip(test_inputs, results)):
             logger.info(f"test input {i}: {input_text}")
             logger.info(f"response: {response}")
             logger.info("-" * 80)
