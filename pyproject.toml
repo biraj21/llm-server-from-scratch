@@ -9,7 +9,9 @@ dependencies = [
     "fastapi[standard]>=0.116.1",
     "pydantic-settings>=2.10.1",
     "python-dotenv>=1.1.1",
+    "python-multipart>=0.0.20",
     "torch>=2.8.0",
+    "torchaudio>=2.8.0",
     "transformers>=4.55.2",
 ]
 

@@ -1,20 +1,18 @@
 import asyncio
-import os
 from collections.abc import AsyncIterable
-from dataclasses import dataclass, field
 from threading import Thread
-from typing import Dict, List, Literal
-from uuid import uuid4
+from typing import List, Literal
 
 import torch
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.env import env
 from src.logger import setup_logger
 
+from .base import HFModel, InferenceRecord, PendingInferenceRequest
 
-class InferenceRequest(BaseModel):
+
+class LLMRequest(BaseModel):
     text: str
     max_output_tokens: int = 200
     stream: bool = False
@@ -23,36 +21,18 @@ class InferenceRequest(BaseModel):
 logger = setup_logger(__name__)
 
 
-@dataclass
-class PendingInferenceRequest:
-    request: InferenceRequest
-    id: str = field(default_factory=lambda: uuid4().hex)
-
-
-@dataclass
-class InferenceRecord:
-    request: InferenceRequest
-    ready_flag: asyncio.Event = field(default_factory=asyncio.Event)
-    response: AsyncIterable[str] | None = None
-
-
-# set the HF_TOKEN env variable for transformers to pick up
-os.environ["HF_TOKEN"] = env.HF_TOKEN
-
-
-class HFModel:
-    def __init__(self, model_name: Literal["google/gemma-3-270m-it"], batch_size: int = 1):
+class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
+    def __init__(self, model_id: Literal["google/gemma-3-270m-it"], batch_size: int = 1):
         """
-        Initializes the HFModel with the specified model name and batch size.
-        Loads the tokenizer and model from Hugging Face.
+        Initializes an LLM from HuggingFace for text generation.
         """
 
-        self.model_name = model_name
+        super().__init__(model_id=model_id, batch_size=batch_size)
 
         # set up model and tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
+            self.model_id,
             device_map="auto",
             low_cpu_mem_usage=True,
         )
@@ -65,15 +45,9 @@ class HFModel:
         self.eos_token_ids = set(eos_token_id)  # convert to set for faster lookup
 
         # batching, queueing and record keeping
-        self.batch_size = batch_size
-        self.request_queue = asyncio.Queue[PendingInferenceRequest](maxsize=self.batch_size)
         self._inference_worker_task = asyncio.create_task(self._inference_worker())
-        self._inference_records: Dict[str, InferenceRecord] = {}
 
-        # storing the event loop for async operations from threads
-        self._event_loop = asyncio.get_event_loop()
-
-    async def generate(self, req: InferenceRequest) -> AsyncIterable[str] | str | None:
+    async def generate(self, req: LLMRequest) -> AsyncIterable[str] | str | None:
         pending_req = PendingInferenceRequest(request=req)
         inference_record = InferenceRecord(request=req)
         self._inference_records[pending_req.id] = inference_record
@@ -95,29 +69,6 @@ class HFModel:
         # non-streaming collect the chunks and return it as a single string
         chunks = [chunk async for chunk in inference_record.response]
         return "".join(chunks)
-
-    async def _collect_batch(self, batch_wait_ms: int = 100) -> List[PendingInferenceRequest]:
-        batch: List[PendingInferenceRequest] = []
-        batch_wait_sec = batch_wait_ms / 1000
-
-        # wait to get one item from the queue first
-        req = await self.request_queue.get()
-        batch.append(req)
-
-        # now try to collect more within the timeout
-        end_time = asyncio.get_event_loop().time() + batch_wait_sec
-        while len(batch) < self.batch_size:
-            remaining_time = end_time - asyncio.get_event_loop().time()
-            if remaining_time <= 0:
-                break
-
-            try:
-                req = await asyncio.wait_for(self.request_queue.get(), timeout=remaining_time)
-                batch.append(req)
-            except asyncio.TimeoutError:
-                break
-
-        return batch
 
     async def _inference_worker(self):
         while True:
@@ -162,7 +113,7 @@ class HFModel:
 
     def _auto_regressive_loop(
         self,
-        requests: List[PendingInferenceRequest],
+        requests: List[PendingInferenceRequest[LLMRequest]],
         token_queues: List[asyncio.Queue[str | None]],
         completed_requests: List[bool],
         batch_complete_event: asyncio.Event,
@@ -233,7 +184,7 @@ class HFModel:
             asyncio.run_coroutine_threadsafe(set_batch_complete_event(), self._event_loop)
 
     def _generate_stream(
-        self, requests: List[PendingInferenceRequest], batch_complete_event: asyncio.Event
+        self, requests: List[PendingInferenceRequest[LLMRequest]], batch_complete_event: asyncio.Event
     ) -> List[AsyncIterable]:
         token_queues: List[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
         completed_requests = [False for _ in requests]
@@ -252,7 +203,7 @@ class HFModel:
 
         return [self._create_stream(queue) for queue in token_queues]
 
-    def _generate_non_stream(self, req: InferenceRequest) -> str:
+    def _generate_non_stream(self, req: LLMRequest) -> str:
         inputs = self.tokenizer(req.text, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(**inputs, max_new_tokens=req.max_output_tokens)
         assert isinstance(outputs, torch.Tensor)

@@ -1,9 +1,21 @@
 # LLM Serving from Scratch
 
-FastAPI server for Google's Gemma 3 270M model with streaming support.
+FastAPI server for serving language and speech models with batched inference and streaming support.
 
 > [!NOTE]
 > This project is a learning experiment and is not intended for production use.
+
+## Models
+
+- google/gemma-3-270m-it
+- openai/whisper-large-v3-turbo
+
+## Features
+
+- **Text Generation**: Google Gemma 3 270M with token streaming via Server-Sent Events
+- **Speech-to-Text**: OpenAI Whisper Large v3 Turbo (non-streaming only)
+- **Batched Inference**: Efficient processing of multiple requests
+- **Independent Completion**: Requests finish as soon as they're done (no batch stragglers)
 
 ## Setup
 
