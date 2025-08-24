@@ -1,38 +1,26 @@
 import asyncio
-import logging
 import os
 from collections.abc import AsyncIterable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from threading import Thread
-from typing import Dict, List, Literal, cast
+from typing import Dict, List, Literal
 from uuid import uuid4
 
 import torch
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-load_dotenv(override=True)
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# Configure logger with timestamp formatter
-handler = logging.StreamHandler()
-# Custom date format with dot separator for milliseconds
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+from src.env import env
+from src.logger import setup_logger
 
 
 class InferenceRequest(BaseModel):
     text: str
     max_output_tokens: int = 200
     stream: bool = False
+
+
+logger = setup_logger(__name__)
 
 
 @dataclass
@@ -48,9 +36,8 @@ class InferenceRecord:
     response: AsyncIterable[str] | None = None
 
 
-# ensure HF_TOKEN is set
-if not os.getenv("HF_TOKEN"):
-    raise ValueError("HF_TOKEN env var needs to be set")
+# set the HF_TOKEN env variable for transformers to pick up
+os.environ["HF_TOKEN"] = env.HF_TOKEN
 
 
 class HFModel:
@@ -280,74 +267,3 @@ class HFModel:
         response = self.tokenizer.decode(outputs, skip_special_tokens=True)
         assert isinstance(response, str)
         return response
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    try:
-        # Load the ML model
-        model = HFModel("google/gemma-3-270m-it", batch_size=8)
-
-        # run test inferences
-        test_inputs = [
-            "Hey, how are you?",
-            "What's the capital of India?",
-            "What's 2 + 2?",
-            "Write a haiku about AI.",
-            "Tell me a joke.",
-            "Explain quantum computing in 2 sentences.",
-            "What is the meaning of life?",
-            "Tell me about Batman",
-        ]
-        inferences_tasks = []
-        for i, text in enumerate(test_inputs):
-            req = InferenceRequest(text=text, max_output_tokens=25, stream=False)
-            task = asyncio.create_task(model.generate(req))
-            inferences_tasks.append(task)
-
-        results = await asyncio.gather(*inferences_tasks)
-        for i, (input_text, response) in enumerate(zip(test_inputs, results)):
-            logger.info(f"test input {i}: {input_text}")
-            logger.info(f"response: {response}")
-            logger.info("-" * 80)
-
-        logger.info("💪 model loaded successfully")
-
-        app.state.model = model
-    except Exception as e:
-        logger.error(f"error loading model:{e}")
-        raise e
-
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.post("/generate")
-async def run_inference(inference_req: InferenceRequest):
-    model = cast(HFModel, app.state.model)  # for type completion
-    response = await model.generate(inference_req)
-    if response is None:
-        return JSONResponse(
-            content={"error": "Request queue is full, please try again later."},
-            status_code=503,
-        )
-
-    if isinstance(response, AsyncIterable):
-
-        async def _stream_with_sse():
-            async for chunk in response:
-                yield f"data: {chunk}\n\n"
-
-        return StreamingResponse(_stream_with_sse(), media_type="text/event-stream")
-
-    return JSONResponse(content={"response": response})

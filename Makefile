@@ -1,8 +1,11 @@
+src_dir = src
+server = $(src_dir)/server.py
+
 format:
-	ruff format && ruff check
+	ruff format $(src_dir) && ruff check $(src_dir)
 
 type-check:
-	uv run pyright .
+	uv run pyright src
 
 dev:
-	uv run fastapi dev main.py
+	uv run fastapi dev $(server)
