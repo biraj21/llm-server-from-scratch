@@ -3,20 +3,26 @@ from collections.abc import AsyncIterable
 from contextlib import asynccontextmanager
 from typing import cast
 
+import torch
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.logger import setup_logger
 from src.model.asr import ASRRequest, HFModelASR
-from src.model.llm import HFModelLLM, LLMRequest
+from src.model.llm import HFModelLLM, LLMRequest, Message
 
 logger = setup_logger(__name__)
 
 
 async def _load_and_warm_up_llm():
     # load the LLM
-    llm = HFModelLLM("google/gemma-3-270m-it", batch_size=8)
+    llm = HFModelLLM("google/gemma-3-270m-it", batch_size=4)
+
+    system_prompt = (
+        "You are a helpful assistant that answers user questions in a simple and concise manner."
+        "Generally in two or three sentences. You only elaborate when asked to do so."
+    )
 
     # run test inferences
     test_inputs = [
@@ -31,7 +37,11 @@ async def _load_and_warm_up_llm():
     ]
     inferences_tasks = []
     for i, text in enumerate(test_inputs):
-        req = LLMRequest(text=text, max_output_tokens=25, stream=False)
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=text),
+        ]
+        req = LLMRequest(messages=messages, max_output_tokens=25, stream=False)
         task = asyncio.create_task(llm.generate(req))
         inferences_tasks.append(task)
 
@@ -41,7 +51,8 @@ async def _load_and_warm_up_llm():
         logger.info(f"response: {response}")
         logger.info("-" * 80)
 
-    logger.info("💪 LLM loaded successfully")
+    logger.info(f"💪 LLM {llm.model_id} loaded successfully")
+    return llm
 
 
 async def _load_and_warm_up_asr():
@@ -54,7 +65,7 @@ async def _load_and_warm_up_asr():
         transcription = await asr_model.transcribe(req)
         logger.info(f"test transcription: {transcription}")
 
-    logger.info("💪 ASR model loaded successfully")
+    logger.info(f"💪 ASR model {asr_model.model_id} loaded successfully")
 
     return asr_model
 
@@ -62,6 +73,14 @@ async def _load_and_warm_up_asr():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        # clear GPU cache before loading models
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info(f"cleared GPU cache (CUDA)")
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            logger.info("cleared GPU cache (MPS)")
+
         app.state.llm = await _load_and_warm_up_llm()
         app.state.asr = await _load_and_warm_up_asr()
     except Exception as e:
@@ -99,6 +118,11 @@ async def generate_text(inference_req: LLMRequest):
                 yield f"data: {chunk}\n\n"
 
         return StreamingResponse(_stream_with_sse(), media_type="text/event-stream")
+    elif isinstance(response, Exception):
+        return JSONResponse(
+            content={"error": str(response)},
+            status_code=500,
+        )
 
     return JSONResponse(content={"response": response})
 
@@ -113,6 +137,11 @@ async def transcribe_audio(file: UploadFile):
         return JSONResponse(
             content={"error": "Request queue is full, please try again later."},
             status_code=503,
+        )
+    elif isinstance(response, Exception):
+        return JSONResponse(
+            content={"error": str(response)},
+            status_code=500,
         )
 
     return JSONResponse(content={"transcription": response})

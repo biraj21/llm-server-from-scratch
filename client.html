@@ -307,6 +307,12 @@
         resize: vertical;
       }
 
+      #systemPrompt {
+        width: 100%;
+        min-height: 50px;
+        resize: vertical;
+      }
+
       /* ASR Section Styles */
       .section-divider {
         border-top: 3px solid #e2e8f0;
@@ -547,19 +553,28 @@
         </div>
 
         <div class="control-group">
+          <div class="control-item custom-prompt">
+            <label for="systemPrompt">System Prompt (applies to all requests):</label>
+            <textarea id="systemPrompt" placeholder="Enter system prompt here...">
+You are a helpful AI assistant. Provide clear, accurate, and concise responses.</textarea
+            >
+          </div>
+        </div>
+
+        <div class="control-group">
           <div class="control-item prompt-selector">
-            <label for="promptType">Prompt Selection:</label>
+            <label for="promptType">User Message Selection:</label>
             <select id="promptType">
-              <option value="default">Use Default Test Prompts</option>
-              <option value="custom">Use Custom Prompt for All</option>
+              <option value="default">Use Default Test Messages</option>
+              <option value="custom">Use Custom Message for All</option>
             </select>
           </div>
         </div>
 
         <div class="control-group" id="customPromptGroup" style="display: none">
           <div class="control-item custom-prompt">
-            <label for="customPromptInput">Custom Prompt:</label>
-            <textarea id="customPromptInput" placeholder="Enter your custom prompt here...">
+            <label for="customPromptInput">Custom User Message:</label>
+            <textarea id="customPromptInput" placeholder="Enter your custom user message here...">
 What is the capital of France?</textarea
             >
           </div>
@@ -634,7 +649,7 @@ What is the capital of France?</textarea
     </div>
 
     <script>
-      const TEST_PROMPTS = [
+      const TEST_USER_MESSAGES = [
         "What is the capital of France?",
         "Explain photosynthesis in plants.",
         "How do you make chocolate chip cookies?",
@@ -700,7 +715,7 @@ What is the capital of France?</textarea
             card.className = "request-card";
             card.id = `request-${i}`;
 
-            const promptText = this.getPromptForRequest(i);
+            const userMessage = this.getUserMessageForRequest(i);
 
             card.innerHTML = `
                         <div class="request-header">
@@ -710,7 +725,7 @@ What is the capital of France?</textarea
                         <div class="request-metrics" id="metrics-${i}">
                             TTFT: - | Total Time: - | Tokens: -
                         </div>
-                        <div class="request-prompt">${promptText}</div>
+                        <div class="request-prompt">${this.escapeHtml(userMessage)}</div>
                         <div class="request-response" id="response-${i}">
                             <span style="color: #64748b;">Waiting to start...</span>
                         </div>
@@ -720,12 +735,31 @@ What is the capital of France?</textarea
           }
         }
 
-        getPromptForRequest(index) {
+        getUserMessageForRequest(index) {
           const promptType = document.getElementById("promptType").value;
           if (promptType === "custom") {
-            return document.getElementById("customPromptInput").value || TEST_PROMPTS[0];
+            return document.getElementById("customPromptInput").value || TEST_USER_MESSAGES[0];
           }
-          return TEST_PROMPTS[index % TEST_PROMPTS.length];
+          return TEST_USER_MESSAGES[index % TEST_USER_MESSAGES.length];
+        }
+
+        buildMessageArray(userMessage) {
+          const systemPrompt = document.getElementById("systemPrompt").value.trim();
+          const messages = [];
+
+          if (systemPrompt) {
+            messages.push({
+              role: "system",
+              content: systemPrompt,
+            });
+          }
+
+          messages.push({
+            role: "user",
+            content: userMessage,
+          });
+
+          return messages;
         }
 
         async startTest() {
@@ -763,10 +797,11 @@ What is the capital of France?</textarea
         async sendRequest(requestIndex) {
           const serverUrl = document.getElementById("serverUrl").value;
           const maxTokens = parseInt(document.getElementById("maxTokens").value);
-          const promptText = this.getPromptForRequest(requestIndex);
+          const userMessage = this.getUserMessageForRequest(requestIndex);
+          const messages = this.buildMessageArray(userMessage);
 
           const requestData = {
-            text: promptText,
+            messages: messages,
             max_output_tokens: maxTokens,
             stream: true,
           };

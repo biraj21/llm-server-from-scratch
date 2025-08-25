@@ -42,6 +42,11 @@ class InferenceRecord(Generic[ReqT, RespT]):
     Must be consumed only after the ready_flag is set.
     """
 
+    error: Exception | None = None
+    """
+    If an error occurred during processing, this will be set.
+    """
+
 
 class HFModel(Generic[ReqT, RespT]):
     def __init__(self, model_id: str, batch_size: int = 1):

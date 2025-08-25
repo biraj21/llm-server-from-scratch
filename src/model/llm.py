@@ -12,8 +12,13 @@ from src.logger import setup_logger
 from .base import HFModel, InferenceRecord, PendingInferenceRequest
 
 
+class Message(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
 class LLMRequest(BaseModel):
-    text: str
+    messages: List[Message] = []
     max_output_tokens: int = 200
     stream: bool = False
 
@@ -36,7 +41,8 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
             device_map="auto",
             low_cpu_mem_usage=True,
         )
-        logger.info(f"Using device: {self.model.device}")
+        self.model.eval()
+        logger.info(f"Using device: {self.model.device} and dtype: {self.model.dtype}")
 
         eos_token_id = self.model.generation_config.eos_token_id if self.model.generation_config else []
         if not isinstance(eos_token_id, list):
@@ -47,7 +53,7 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
         # batching, queueing and record keeping
         self._inference_worker_task = asyncio.create_task(self._inference_worker())
 
-    async def generate(self, req: LLMRequest) -> AsyncIterable[str] | str | None:
+    async def generate(self, req: LLMRequest) -> Exception | AsyncIterable[str] | str | None:
         pending_req = PendingInferenceRequest(request=req)
         inference_record = InferenceRecord(request=req)
         self._inference_records[pending_req.id] = inference_record
@@ -61,6 +67,10 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
 
         # await response to be available
         await inference_record.ready_flag.wait()
+
+        # return error if any
+        if inference_record.error is not None:
+            return inference_record.error
 
         # handle failure (None) or streaming response
         if inference_record.response is None or req.stream:
@@ -121,8 +131,23 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
         logger.info(f"Starting auto-regressive loop for inference generation with {len(requests)} requests.")
         try:
             max_new_tokens = max(pr.request.max_output_tokens for pr in requests)
+
+            # prepare the inputs
+            formatted_chats: List[str] = []
+            for r in requests:
+                formatted = self.tokenizer.apply_chat_template(
+                    r.request.messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                if not isinstance(formatted, str):
+                    # TODO: set error in inference record
+                    raise ValueError("Formatted chat is not a string")
+
+                formatted_chats.append(formatted)
+
             inputs = self.tokenizer(
-                [pr.request.text for pr in requests],
+                formatted_chats,
                 padding=True,  # pad all to same length
                 return_tensors="pt",
             ).to(self.model.device)
@@ -204,7 +229,12 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
         return [self._create_stream(queue) for queue in token_queues]
 
     def _generate_non_stream(self, req: LLMRequest) -> str:
-        inputs = self.tokenizer(req.text, return_tensors="pt").to(self.model.device)
+        inputs = self.tokenizer.apply_chat_template(
+            req.messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_tensors="pt",
+        ).to(self.model.device)
         outputs = self.model.generate(**inputs, max_new_tokens=req.max_output_tokens)
         assert isinstance(outputs, torch.Tensor)
 

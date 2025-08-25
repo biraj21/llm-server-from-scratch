@@ -45,7 +45,7 @@ class HFModelASR(HFModel[ASRRequest, str]):
         self._inference_worker_thread = threading.Thread(target=self._inference_worker, daemon=True)
         self._inference_worker_thread.start()
 
-    async def transcribe(self, req: ASRRequest):
+    async def transcribe(self, req: ASRRequest) -> Exception | str | None:
         pending_req = PendingInferenceRequest(request=req)
         inference_record = InferenceRecord(request=req)
         self._inference_records[pending_req.id] = inference_record
@@ -60,23 +60,41 @@ class HFModelASR(HFModel[ASRRequest, str]):
         # await response to be available
         await inference_record.ready_flag.wait()
 
+        # return error if any
+        if inference_record.error is not None:
+            return inference_record.error
+
         return inference_record.response
 
     def _inference_worker(self):
         while True:
-            num_items = 0
+            batch = []
             try:
                 batch = asyncio.run_coroutine_threadsafe(
                     self._collect_batch(),
                     loop=self._event_loop,
                 ).result()
-                num_items = len(batch)
 
                 self._generate(batch)
             except Exception as e:
                 logger.error(f"Error during inference: {e}")
+                for req in batch:
+                    inference_record = self._inference_records.get(req.id)
+                    if not inference_record:
+                        logger.error(f"Record for request {req.id} not found.")
+                        continue
+
+                    inference_record.error = e
+
+                    async def set_ready_flag(record: InferenceRecord):
+                        record.ready_flag.set()
+
+                    asyncio.run_coroutine_threadsafe(
+                        set_ready_flag(inference_record),
+                        loop=self._event_loop,
+                    )
             finally:
-                for i in range(num_items):
+                for i in range(len(batch)):
                     self.request_queue.task_done()
 
     def _generate(self, batch: List[PendingInferenceRequest[ASRRequest]]):

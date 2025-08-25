@@ -1,4 +1,4 @@
-# LLM Serving from Scratch
+# Model Serving from Scratch
 
 FastAPI server for serving language and speech models with batched inference and streaming support.
 
@@ -54,5 +54,6 @@ curl -X POST "http://localhost:8000/generate" \
 - ✅ Token streaming
 - ✅ Request batching
 - ✅ Concurrent inference
+- ✅ Whisper for STT
 - ❌ Continuous batching
 - ❌ KV caching optimization
