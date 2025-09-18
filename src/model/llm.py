@@ -167,7 +167,13 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
                     generated_token_logits = outputs.logits[:, -1, :]  # [batch_size, vocab_size]
 
                     # greedy sampling (getting the token with the highest probability)
-                    generated_tokens = torch.argmax(generated_token_logits, dim=-1).reshape(-1, 1)  # [batch_size, 1]
+                    # generated_tokens = torch.argmax(generated_token_logits, dim=-1).reshape(-1, 1)  # [batch_size, 1]
+
+                    # use logits to generate probabilities of each token across vocab
+                    probs = torch.softmax(generated_token_logits, dim=-1)
+
+                    # sample indices (tokens) using these probabilities
+                    generated_tokens = torch.multinomial(probs, num_samples=1)  # [batch_size, 1]
 
                     # decode the token
                     for req_idx, token_id in enumerate(generated_tokens):
