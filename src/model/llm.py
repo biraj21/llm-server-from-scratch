@@ -4,7 +4,7 @@ from threading import Thread
 from typing import List, Literal
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.logger import setup_logger
@@ -19,6 +19,7 @@ class Message(BaseModel):
 
 class LLMRequest(BaseModel):
     messages: List[Message] = []
+    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     max_output_tokens: int = 200
     stream: bool = False
 
@@ -152,6 +153,14 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
                 return_tensors="pt",
             ).to(self.model.device)
 
+            temperatures = torch.tensor(
+                [r.request.temperature for r in requests],
+                device=self.model.device,
+            )  # [batch_size]
+
+            greedy_mask = temperatures == 0.0  # argmax
+            non_greedy_mask = ~greedy_mask  # random sampling with scaled logits
+
             input_ids = inputs["input_ids"]  # [batch_size, max_seq_length]
             # attention_mask = inputs["attention_mask"]  # same shape as input_ids
 
@@ -164,16 +173,37 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
 
                     # outputs.logits has shape [batch_size, max_seq_length, vocab_size]
                     # for each request, we only need the logits for the latest generation,
-                    generated_token_logits = outputs.logits[:, -1, :]  # [batch_size, vocab_size]
+                    generated_token_logits: torch.Tensor = outputs.logits[:, -1, :]  # [batch_size, vocab_size]
 
-                    # greedy sampling (getting the token with the highest probability)
-                    # generated_tokens = torch.argmax(generated_token_logits, dim=-1).reshape(-1, 1)  # [batch_size, 1]
+                    # handle zero temperature (greedy sampling)
+                    argmaxed_tokens = sampled_tokens = None
+                    if greedy_mask.any():
+                        # greedy sampling - getting the token with the highest probability
+                        argmaxed_tokens = torch.argmax(generated_token_logits[greedy_mask], dim=-1).view(-1)
 
-                    # use logits to generate probabilities of each token across vocab
-                    probs = torch.softmax(generated_token_logits, dim=-1)
+                    # handle non-zero temperature (random sampling with scaled logits)
+                    if non_greedy_mask.any():
+                        sampling_logits = generated_token_logits[non_greedy_mask]  # [non-zero temp inputs, vocab_size]
+                        sampling_temps = temperatures[non_greedy_mask].view(-1, 1)  # [non-zero temp inputs, 1]
 
-                    # sample indices (tokens) using these probabilities
-                    generated_tokens = torch.multinomial(probs, num_samples=1)  # [batch_size, 1]
+                        # apply temperature scaling
+                        scaled_logits = sampling_logits / sampling_temps  # [non-zero temp inputs, vocab_size]
+
+                        # use logits to generate probabilities of each token across vocab
+                        probs = torch.softmax(scaled_logits, dim=-1)  # [non-zero temp inputs, vocab_size]
+
+                        # sample indices (tokens) using these probabilities
+                        sampled_tokens = torch.multinomial(probs, num_samples=1).view(-1)  # [non-zero temp inputs]
+
+                    # a tensor of shape [batch_size] that will combine both
+                    # argmax (for zero temp) and sampled (for non-zero temp) tokens
+                    generated_tokens = torch.zeros(len(requests), dtype=torch.long, device=self.model.device)
+
+                    if argmaxed_tokens is not None:
+                        generated_tokens[greedy_mask] = argmaxed_tokens
+
+                    if sampled_tokens is not None:
+                        generated_tokens[non_greedy_mask] = sampled_tokens
 
                     # decode the token
                     for req_idx, token_id in enumerate(generated_tokens):
@@ -195,7 +225,9 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
                             self._event_loop,
                         )
 
-                    input_ids = torch.cat([input_ids, generated_tokens], dim=-1)  # [batch_size, max_seq_length + 1]
+                    input_ids = torch.cat(
+                        [input_ids, generated_tokens.view(-1, 1)], dim=-1
+                    )  # [batch_size, max_seq_length + 1]
         except Exception as e:
             logger.error(f"Error during auto-regressive loop: {e}")
         finally:
