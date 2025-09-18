@@ -55,5 +55,6 @@ curl -X POST "http://localhost:8000/generate" \
 - ✅ Request batching
 - ✅ Concurrent inference
 - ✅ Whisper for STT
+- ✅ Temperature adjustment
 - ❌ Continuous batching
 - ❌ KV caching optimization
