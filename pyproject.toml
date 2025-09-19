@@ -18,9 +18,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "datasets[audio]>=4.0.0",
-    "pyright>=1.1.404",
     "ruff>=0.12.9",
     "tqdm>=4.67.1",
+    "ty>=0.0.1a20",
 ]
 
 
