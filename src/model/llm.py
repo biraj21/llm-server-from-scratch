@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterable
 from threading import Thread
-from typing import List, Literal
+from typing import Literal
 
 import torch
 from pydantic import BaseModel, Field
@@ -18,7 +18,7 @@ class Message(BaseModel):
 
 
 class LLMRequest(BaseModel):
-    messages: List[Message] = []
+    messages: list[Message] = []
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     max_output_tokens: int = 200
     stream: bool = False
@@ -124,9 +124,9 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
 
     def _auto_regressive_loop(
         self,
-        requests: List[PendingInferenceRequest[LLMRequest]],
-        token_queues: List[asyncio.Queue[str | None]],
-        completed_requests: List[bool],
+        requests: list[PendingInferenceRequest[LLMRequest]],
+        token_queues: list[asyncio.Queue[str | None]],
+        completed_requests: list[bool],
         batch_complete_event: asyncio.Event,
     ):
         logger.info(f"Starting auto-regressive loop for inference generation with {len(requests)} requests.")
@@ -134,7 +134,7 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
             max_new_tokens = max(pr.request.max_output_tokens for pr in requests)
 
             # prepare the inputs
-            formatted_chats: List[str] = []
+            formatted_chats: list[str] = []
             for r in requests:
                 formatted = self.tokenizer.apply_chat_template(
                     r.request.messages,
@@ -247,9 +247,9 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
             asyncio.run_coroutine_threadsafe(set_batch_complete_event(), self._event_loop)
 
     def _generate_stream(
-        self, requests: List[PendingInferenceRequest[LLMRequest]], batch_complete_event: asyncio.Event
-    ) -> List[AsyncIterable]:
-        token_queues: List[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
+        self, requests: list[PendingInferenceRequest[LLMRequest]], batch_complete_event: asyncio.Event
+    ) -> list[AsyncIterable[str]]:
+        token_queues: list[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
         completed_requests = [False for _ in requests]
 
         # start the auto-regressive loop in a separate thread

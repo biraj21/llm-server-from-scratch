@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from typing import List, Literal
+from typing import Literal
 
 import torch
 from pydantic import BaseModel
@@ -97,7 +97,7 @@ class HFModelASR(HFModel[ASRRequest, str]):
                 for i in range(len(batch)):
                     self.request_queue.task_done()
 
-    def _generate(self, batch: List[PendingInferenceRequest[ASRRequest]]):
+    def _generate(self, batch: list[PendingInferenceRequest[ASRRequest]]):
         with torch.no_grad():
             with sdpa_kernel(SDPBackend.MATH):
                 # process batch of audio

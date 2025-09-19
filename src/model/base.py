@@ -1,7 +1,7 @@
 import asyncio
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Generic, List, TypeVar
+from typing import Generic, TypeVar
 from uuid import uuid4
 
 from src.env import env
@@ -55,7 +55,7 @@ class HFModel(Generic[ReqT, RespT]):
         # batching, queueing and record keeping
         self.batch_size = batch_size
         self.request_queue: asyncio.Queue[PendingInferenceRequest[ReqT]] = asyncio.Queue(maxsize=self.batch_size)
-        self._inference_records: Dict[str, InferenceRecord[ReqT, RespT]] = {}
+        self._inference_records: dict[str, InferenceRecord[ReqT, RespT]] = {}
 
         # set the HF_TOKEN env variable for transformers to pick up
         os.environ["HF_TOKEN"] = env.HF_TOKEN
@@ -63,8 +63,8 @@ class HFModel(Generic[ReqT, RespT]):
         # storing the event loop for async operations from threads
         self._event_loop = asyncio.get_event_loop()
 
-    async def _collect_batch(self, batch_wait_ms: int = 100) -> List[PendingInferenceRequest[ReqT]]:
-        batch: List[PendingInferenceRequest[ReqT]] = []
+    async def _collect_batch(self, batch_wait_ms: int = 100) -> list[PendingInferenceRequest[ReqT]]:
+        batch: list[PendingInferenceRequest[ReqT]] = []
         batch_wait_sec = batch_wait_ms / 1000
 
         # wait to get one item from the queue first
