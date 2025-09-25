@@ -1,4 +1,6 @@
-# Model Serving from Scratch
+# Model Serving from Scratch\*
+
+(using HF transformers)
 
 FastAPI server for serving language and speech models with batched inference and streaming support.
 
@@ -57,4 +59,4 @@ curl -X POST "http://localhost:8000/generate" \
 - ✅ Whisper for STT
 - ✅ Temperature adjustment
 - ❌ Continuous batching
-- ❌ KV caching optimization
+- ✅ KV caching optimization - not really from scratch as i just used `past_key_values` from transformers :(

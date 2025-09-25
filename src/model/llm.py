@@ -164,12 +164,21 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
             input_ids = inputs["input_ids"]  # [batch_size, max_seq_length]
             # attention_mask = inputs["attention_mask"]  # same shape as input_ids
 
+            past_key_values: torch.Tensor | None = None
+
             # we don't need gradients for inference
             with torch.no_grad():
                 for i in range(max_new_tokens):
                     # one forward pass
                     # passing attention_mask caused it to get stuck in a loop idk why
-                    outputs = self.model(input_ids)
+                    outputs = self.model(
+                        input_ids=input_ids
+                        if past_key_values is None
+                        else input_ids[:, -1:],  # only last token after first iteration
+                        past_key_values=past_key_values,
+                    )
+
+                    past_key_values = outputs.past_key_values
 
                     # outputs.logits has shape [batch_size, max_seq_length, vocab_size]
                     # for each request, we only need the logits for the latest generation,
