@@ -10,7 +10,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 from src.logger import setup_logger
 from src.utils import bytes_to_tensor
 
-from .base import HFModel, InferenceRecord, PendingInferenceRequest
+from .base import HFModel, InferenceRecord, InferenceRequest, InferenceState
 
 logger = setup_logger(__name__)
 
@@ -46,25 +46,15 @@ class HFModelASR(HFModel[ASRRequest, str]):
         self._inference_worker_thread.start()
 
     async def transcribe(self, req: ASRRequest) -> Exception | str | None:
-        pending_req = PendingInferenceRequest(request=req)
-        inference_record = InferenceRecord(request=req)
-        self._inference_records[pending_req.id] = inference_record
-
-        try:
-            self.request_queue.put_nowait(pending_req)
-        except asyncio.QueueFull:
-            logger.error("Request queue is full, cannot process the request at this time.")
-            self._inference_records.pop(pending_req.id, None)
+        inference = await self._process_request(req)
+        if inference is None:
             return None
 
-        # await response to be available
-        await inference_record.ready_flag.wait()
-
         # return error if any
-        if inference_record.error is not None:
-            return inference_record.error
+        if inference.error is not None:
+            return inference.error
 
-        return inference_record.response
+        return inference.response
 
     def _inference_worker(self):
         while True:
@@ -97,12 +87,13 @@ class HFModelASR(HFModel[ASRRequest, str]):
                 for i in range(len(batch)):
                     self.request_queue.task_done()
 
-    def _generate(self, batch: list[PendingInferenceRequest[ASRRequest]]):
+    def _generate(self, batch: list[InferenceRequest[ASRRequest]]):
         with torch.no_grad():
             with sdpa_kernel(SDPBackend.MATH):
                 # process batch of audio
                 batch_features = []
                 for req in batch:
+                    req.state = InferenceState.PROCESSING
                     audio, sample_rate = bytes_to_tensor(req.request.audio)
                     logger.info(f"birajlog request audio: {audio.shape}, {sample_rate}")
                     features = self.processor(audio, sampling_rate=sample_rate, return_tensors="pt").input_features
@@ -132,6 +123,7 @@ class HFModelASR(HFModel[ASRRequest, str]):
                     logger.error(f"Record for request {req.id} not found.")
                     continue
 
+                req.state = InferenceState.COMPLETED
                 inference_record.response = transcription
 
                 async def set_ready_flag(record: InferenceRecord):

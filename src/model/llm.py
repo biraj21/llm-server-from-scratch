@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterable
 from threading import Thread
-from typing import Literal
+from typing import Callable, Literal
 
 import torch
 from pydantic import BaseModel, Field
@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.logger import setup_logger
 
-from .base import HFModel, InferenceRecord, PendingInferenceRequest
+from .base import HFModel, InferenceRequest, InferenceState
 
 
 class Message(BaseModel):
@@ -55,30 +55,20 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
         self._inference_worker_task = asyncio.create_task(self._inference_worker())
 
     async def generate(self, req: LLMRequest) -> Exception | AsyncIterable[str] | str | None:
-        pending_req = PendingInferenceRequest(request=req)
-        inference_record = InferenceRecord(request=req)
-        self._inference_records[pending_req.id] = inference_record
-
-        try:
-            self.request_queue.put_nowait(pending_req)
-        except asyncio.QueueFull:
-            logger.error("Request queue is full, cannot process the request at this time.")
-            self._inference_records.pop(pending_req.id, None)
+        inference = await self._process_request(req)
+        if inference is None:
             return None
 
-        # await response to be available
-        await inference_record.ready_flag.wait()
-
         # return error if any
-        if inference_record.error is not None:
-            return inference_record.error
+        if inference.error is not None:
+            return inference.error
 
         # handle failure (None) or streaming response
-        if inference_record.response is None or req.stream:
-            return inference_record.response
+        if inference.response is None or req.stream:
+            return inference.response
 
         # non-streaming collect the chunks and return it as a single string
-        chunks = [chunk async for chunk in inference_record.response]
+        chunks = [chunk async for chunk in inference.response]
         return "".join(chunks)
 
     async def _inference_worker(self):
@@ -116,7 +106,8 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
         """
 
         while True:
-            token = await queue.get()
+            # wrapping in wait_for to avoid waiting forever in case of some bug in the code
+            token = await asyncio.wait_for(queue.get(), timeout=10)
             if token is None:
                 break
 
@@ -124,10 +115,9 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
 
     def _auto_regressive_loop(
         self,
-        requests: list[PendingInferenceRequest[LLMRequest]],
+        requests: list[InferenceRequest[LLMRequest]],
         token_queues: list[asyncio.Queue[str | None]],
-        completed_requests: list[bool],
-        batch_complete_event: asyncio.Event,
+        set_batch_complete: Callable[[], None],
     ):
         logger.info(f"Starting auto-regressive loop for inference generation with {len(requests)} requests.")
         try:
@@ -136,14 +126,21 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
             # prepare the inputs
             formatted_chats: list[str] = []
             for r in requests:
+                r.state = InferenceState.PROCESSING
                 formatted = self.tokenizer.apply_chat_template(
                     r.request.messages,
                     tokenize=False,
                     add_generation_prompt=True,
                 )
                 if not isinstance(formatted, str):
-                    # TODO: set error in inference record
-                    raise ValueError("Formatted chat is not a string")
+                    inference = self._inference_records.get(r.id)
+                    if not inference:
+                        logger.error(
+                            f"_auto_regressive_loop(): apply_chat_template error: Record for request {r.id} not found."
+                        )
+                        continue
+
+                    inference.error = ValueError("Formatted chat is not a string")
 
                 formatted_chats.append(formatted)
 
@@ -206,60 +203,71 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
 
                     # a tensor of shape [batch_size] that will combine both
                     # argmax (for zero temp) and sampled (for non-zero temp) tokens
-                    generated_tokens = torch.zeros(len(requests), dtype=torch.long, device=self.model.device)
+                    generated_token_ids = torch.zeros(len(requests), dtype=torch.long, device=self.model.device)
 
                     if argmaxed_tokens is not None:
-                        generated_tokens[greedy_mask] = argmaxed_tokens
+                        generated_token_ids[greedy_mask] = argmaxed_tokens
 
                     if sampled_tokens is not None:
-                        generated_tokens[non_greedy_mask] = sampled_tokens
+                        generated_token_ids[non_greedy_mask] = sampled_tokens
 
                     # decode the token
-                    for req_idx, token_id in enumerate(generated_tokens):
+                    for token_id, req, token_queue in zip(generated_token_ids, requests, token_queues):
                         # skip if this request has already completed
-                        if completed_requests[req_idx]:
+                        if req.state == InferenceState.PENDING:
+                            logger.warning(f"Request {req.id} is still in PENDING state during generation.")
+                            req.state = InferenceState.FAILED
+                            asyncio.run_coroutine_threadsafe(token_queue.put(None), self._event_loop)
+                            continue
+
+                        if req.state != InferenceState.PROCESSING:
                             continue
 
                         token_id = token_id.squeeze().item()  # convert to python int
                         if token_id in self.eos_token_ids:
                             # signal end of generation
-                            asyncio.run_coroutine_threadsafe(token_queues[req_idx].put(None), self._event_loop)
-                            completed_requests[req_idx] = True
-                            logger.info(f"Request {requests[req_idx].id} completed at step {i + 1}.")
+                            asyncio.run_coroutine_threadsafe(token_queue.put(None), self._event_loop)
+                            req.state = InferenceState.COMPLETED
+                            logger.info(f"Request {req.id} completed at step {i + 1}.")
                             continue
 
                         decoded_token = self.tokenizer.decode(token_id, skip_special_tokens=False)
                         asyncio.run_coroutine_threadsafe(
-                            token_queues[req_idx].put(decoded_token),
+                            token_queue.put(decoded_token),
                             self._event_loop,
                         )
 
                     input_ids = torch.cat(
-                        [input_ids, generated_tokens.view(-1, 1)], dim=-1
+                        [input_ids, generated_token_ids.view(-1, 1)], dim=-1
                     )  # [batch_size, max_seq_length + 1]
         except Exception as e:
             logger.error(f"Error during auto-regressive loop: {e}")
+
+            # signal end of generation
+            for req, token_queue in zip(requests, token_queues):
+                if req.state == InferenceState.PROCESSING:
+                    asyncio.run_coroutine_threadsafe(token_queue.put(None), self._event_loop)
+                    req.state = InferenceState.FAILED
         finally:
             # signal end of generation
-            for req_idx, queue in enumerate(token_queues):
-                if completed_requests[req_idx]:
-                    continue
-
-                asyncio.run_coroutine_threadsafe(queue.put(None), self._event_loop)
-                completed_requests[req_idx] = True
+            for req, token_queue in zip(requests, token_queues):
+                if req.state == InferenceState.PROCESSING:
+                    asyncio.run_coroutine_threadsafe(token_queue.put(None), self._event_loop)
+                    req.state = InferenceState.FAILED
 
             logger.info("Auto-regressive loop completed for all requests. Ready to accept new batch.")
-
-            async def set_batch_complete_event():
-                batch_complete_event.set()
-
-            asyncio.run_coroutine_threadsafe(set_batch_complete_event(), self._event_loop)
+            set_batch_complete()
 
     def _generate_stream(
-        self, requests: list[PendingInferenceRequest[LLMRequest]], batch_complete_event: asyncio.Event
+        self, requests: list[InferenceRequest[LLMRequest]], batch_complete_event: asyncio.Event
     ) -> list[AsyncIterable[str]]:
         token_queues: list[asyncio.Queue[str | None]] = [asyncio.Queue() for _ in requests]
-        completed_requests = [False for _ in requests]
+
+        def set_batch_complete_event():
+            async def _set_async():
+                batch_complete_event.set()
+
+            asyncio.run_coroutine_threadsafe(_set_async(), self._event_loop)
 
         # start the auto-regressive loop in a separate thread
         Thread(
@@ -267,8 +275,7 @@ class HFModelLLM(HFModel[LLMRequest, AsyncIterable[str]]):
             kwargs={
                 "requests": requests,
                 "token_queues": token_queues,
-                "completed_requests": completed_requests,
-                "batch_complete_event": batch_complete_event,
+                "set_batch_complete": set_batch_complete_event,
             },
             daemon=True,
         ).start()
