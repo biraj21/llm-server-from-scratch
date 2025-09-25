@@ -1,5 +1,6 @@
 {
   "pythonVersion": "3.12",
   "venvPath": ".",
-  "venv": ".venv"
+  "venv": ".venv",
+  "reportUnusedCallResult": false
 }

@@ -5,7 +5,7 @@ format:
 	ruff format $(src_dir) && ruff check $(src_dir)
 
 type-check:
-	uv run ty check $(src_dir)
+	uv run pyright $(src_dir)
 
 dev:
 	uv run fastapi dev $(server)

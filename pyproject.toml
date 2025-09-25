@@ -12,15 +12,15 @@ dependencies = [
     "python-multipart>=0.0.20",
     "torch>=2.8.0",
     "torchaudio>=2.8.0",
-    "transformers>=4.55.2",
+    "transformers>=4.56.1",
 ]
 
 [dependency-groups]
 dev = [
     "datasets[audio]>=4.0.0",
+    "pyright>=1.1.405",
     "ruff>=0.12.9",
     "tqdm>=4.67.1",
-    "ty>=0.0.1a20",
 ]
 
 
